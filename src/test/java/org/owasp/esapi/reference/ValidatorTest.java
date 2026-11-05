@@ -381,7 +381,7 @@ public class ValidatorTest extends TestCase {
 
             // Unix specific paths should pass
             assertTrue(instance.isValidDirectoryPath("test", "/", parent, false));         // Root directory
-            assertTrue(instance.isValidDirectoryPath("test", "/bin", parent, false));      // Always exist directory
+            assertTrue(instance.isValidDirectoryPath("test", "/usr/bin", parent, false));      // Always exist directory
 
             // Unix specific paths that should not exist or work
             assertFalse(instance.isValidDirectoryPath("test", "/bin/sh", parent, false));   // Standard shell, not dir
@@ -405,7 +405,7 @@ public class ValidatorTest extends TestCase {
             // Unix specific paths should pass
             assertTrue(instance.isValidDirectoryPath("test6", "/", parent, false, errors));         // Root directory
             assertTrue(errors.size()==5);
-            assertTrue(instance.isValidDirectoryPath("test7", "/bin", parent, false, errors));      // Always exist directory
+            assertTrue(instance.isValidDirectoryPath("test7", "/usr/bin", parent, false, errors));      // Always exist directory
             assertTrue(errors.size()==5);
 
             // Unix specific paths that should not exist or work
