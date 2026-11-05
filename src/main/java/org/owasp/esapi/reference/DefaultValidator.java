@@ -314,10 +314,15 @@ public class DefaultValidator implements org.owasp.esapi.Validator {
 
 	/**
 	 * {@inheritDoc}
+	 * <p>
+	 * This implementation fails closed: it returns {@code true} only if the
+	 * AntiSamy scan reports no errors <b>and</b> the sanitized HTML is exactly
+	 * equal to {@code input}. Any difference, any AntiSamy scan error, or any
+	 * exception results in {@code false}.
 	 */
 	public boolean isValidSafeHTML(String context, String input, int maxLength, boolean allowNull) throws IntrusionException {
 		try {
-			getValidSafeHTML( context, input, maxLength, allowNull);
+			assertSafeHTMLUnaltered( context, input, maxLength, allowNull);
 			return true;
 		} catch( Exception e ) {
 			return false;
@@ -326,13 +331,74 @@ public class DefaultValidator implements org.owasp.esapi.Validator {
 
         /**
 	 * {@inheritDoc}
+	 * <p>
+	 * This implementation fails closed: it returns {@code true} only if the
+	 * AntiSamy scan reports no errors <b>and</b> the sanitized HTML is exactly
+	 * equal to {@code input}. Any difference, any AntiSamy scan error, or any
+	 * other validation failure results in {@code false} and the corresponding
+	 * {@code ValidationException} being added to {@code errors}.
 	 */
 	public boolean isValidSafeHTML(String context, String input, int maxLength, boolean allowNull, ValidationErrorList errors) throws IntrusionException {
 		try {
-			getValidSafeHTML( context, input, maxLength, allowNull);
+			assertSafeHTMLUnaltered( context, input, maxLength, allowNull);
 			return true;
 		} catch( ValidationException e ) {
             errors.addError(context, e);
+			return false;
+		}
+	}
+
+	/**
+	 * Fail-closed check backing both {@code isValidSafeHTML} methods. See
+	 * GitHub Security Advisory GHSA-r68h-jhhj-9jvm.
+	 * <p>
+	 * Completes normally only if AntiSamy reports no scan errors for
+	 * {@code input} and the sanitized HTML is exactly equal to {@code input}
+	 * (or if {@code input} is {@code null} / empty and {@code allowNull} is
+	 * {@code true}). Otherwise a {@code ValidationException} is thrown.
+	 *
+	 * @throws ValidationException if {@code input} is not valid, AntiSamy
+	 *         reports any scan error, sanitization would alter {@code input} in
+	 *         any way, or validation fails unexpectedly.
+	 * @throws IntrusionException if {@code input} likely indicates an attack.
+	 */
+	private void assertSafeHTMLUnaltered(String context, String input, int maxLength, boolean allowNull) throws ValidationException, IntrusionException {
+		HTMLValidationRule hvr = new FailClosedHTMLValidationRule( "safehtml", encoder );
+		hvr.setMaximumLength(maxLength);
+		hvr.setAllowNull(allowNull);
+
+		String safe;
+		try {
+			safe = hvr.getValid(context, input);
+		} catch( ValidationException e ) {
+			throw e;
+		} catch( IntrusionException e ) {
+			throw e;
+		} catch( RuntimeException e ) {
+			throw new ValidationException( context + ": Invalid HTML input", "Unexpected failure validating HTML input: context=" + context + " error=" + e.getMessage(), e, context );
+		}
+
+		if ( safe == null ) {
+			// Only returned for null / empty input when allowNull is true.
+			return;
+		}
+		if ( ! safe.equals(input) ) {
+			throw new ValidationException( context + ": Invalid HTML input", "HTML input is altered by AntiSamy sanitization and therefore is not safe to use as-is: context=" + context, context );
+		}
+	}
+
+	/**
+	 * An {@code HTMLValidationRule} that always treats AntiSamy scan errors as
+	 * validation failures rather than only logging them. Only used by
+	 * {@code isValidSafeHTML}.
+	 */
+	private static final class FailClosedHTMLValidationRule extends HTMLValidationRule {
+		FailClosedHTMLValidationRule( String typeName, Encoder encoder ) {
+			super( typeName, encoder );
+		}
+
+		@Override
+		protected boolean legacyHtmlValidation() {
 			return false;
 		}
 	}

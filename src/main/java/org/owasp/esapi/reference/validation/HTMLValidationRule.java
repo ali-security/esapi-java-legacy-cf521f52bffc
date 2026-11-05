@@ -97,6 +97,25 @@ public class HTMLValidationRule extends StringValidationRule {
 		return safe;
 	}
 
+	/**
+	 * Determines how AntiSamy scan errors are handled. When this returns
+	 * {@code true} (the default), any AntiSamy scan errors are only logged and the
+	 * cleaned (sanitized) HTML is returned. When this returns {@code false}, any
+	 * AntiSamy scan errors result in a {@code ValidationException} being thrown.
+	 * <p>
+	 * Subclasses may override this to return {@code false} so that any AntiSamy
+	 * scan errors always result in a {@code ValidationException}. (ESAPI's own
+	 * {@code DefaultValidator.isValidSafeHTML} implementation does this so that it
+	 * fails closed; see GitHub Security Advisory GHSA-r68h-jhhj-9jvm.)
+	 *
+	 * @return {@code true} if AntiSamy scan errors should only be logged and the
+	 *         cleaned HTML returned; {@code false} if they should cause a
+	 *         {@code ValidationException} to be thrown.
+	 */
+	protected boolean legacyHtmlValidation() {
+		return true;
+	}
+
 	private String invokeAntiSamy( String context, String input ) throws ValidationException {
 		// CHECKME should this allow empty Strings? "   " us IsBlank instead?
 	    if ( StringUtilities.isEmpty(input) ) {
@@ -114,6 +133,9 @@ public class HTMLValidationRule extends StringValidationRule {
 			
 			List<String> errors = test.getErrorMessages();
 			if ( !errors.isEmpty() ) {
+				if ( !legacyHtmlValidation() ) {
+					throw new ValidationException( context + ": Invalid HTML input", "Invalid HTML input does not follow rules in antisamy-esapi.xml: context=" + context + " errors=" + errors, context );
+				}
 				LOGGER.info( Logger.SECURITY_FAILURE, "Cleaned up invalid HTML input: " + errors );
 			}
 			
