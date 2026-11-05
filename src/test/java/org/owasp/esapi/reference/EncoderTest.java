@@ -16,27 +16,36 @@
 package org.owasp.esapi.reference;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.ObjectOutputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Properties;
 
 import org.junit.Ignore;
 import org.owasp.esapi.ESAPI;
 import org.owasp.esapi.Encoder;
 import org.owasp.esapi.EncoderConstants;
+import org.owasp.esapi.SecurityConfiguration;
+import org.owasp.esapi.SecurityConfigurationWrapper;
 import org.owasp.esapi.codecs.Base64;
 import org.owasp.esapi.codecs.Codec;
+import org.owasp.esapi.codecs.DB2Codec;
 import org.owasp.esapi.codecs.HTMLEntityCodec;
 import org.owasp.esapi.codecs.MySQLCodec;
 import org.owasp.esapi.codecs.OracleCodec;
 import org.owasp.esapi.codecs.PushbackString;
 import org.owasp.esapi.codecs.UnixCodec;
 import org.owasp.esapi.codecs.WindowsCodec;
+import org.owasp.esapi.errors.ConfigurationException;
 import org.owasp.esapi.errors.EncodingException;
 import org.owasp.esapi.errors.IntrusionException;
+import org.owasp.esapi.errors.NotConfiguredByDefaultException;
 
 import junit.framework.Test;
 import junit.framework.TestCase;
@@ -49,6 +58,40 @@ import junit.framework.TestSuite;
  */
 public class EncoderTest extends TestCase {
     
+    /**
+     * {@code SecurityConfiguration} wrapper that controls the value of the
+     * ESAPI property <b>ESAPI.dangerouslyAllowUnsafeMethods.methodNames</b>
+     * so that the gating of {@code Encoder.encodeForSQL} (CVE-2025-5878,
+     * ESAPI Security Bulletin #13) can be tested.
+     */
+    private static class UnsafeMethodsConf extends SecurityConfigurationWrapper
+    {
+        private final String allowedUnsafeMethods;
+
+        /**
+         * @param orig   The original {@code SecurityConfiguration} to use as a basis.
+         * @param allowedUnsafeMethods Value of the ESAPI property
+         *               <b>ESAPI.dangerouslyAllowUnsafeMethods.methodNames</b>. If
+         *               {@code null}, the property is treated as not being present.
+         */
+        UnsafeMethodsConf(SecurityConfiguration orig, String allowedUnsafeMethods)
+        {
+            super(orig);
+            this.allowedUnsafeMethods = allowedUnsafeMethods;
+        }
+
+        @Override
+        public String getStringProp(String propertyName) throws ConfigurationException
+        {
+            if ( DefaultSecurityConfiguration.ACCEPTED_UNSAFE_METHOD_NAMES.equals(propertyName) ) {
+                if ( allowedUnsafeMethods == null ) {
+                    throw new ConfigurationException("SecurityConfiguration for " + propertyName + " not found in ESAPI.properties");
+                }
+                return allowedUnsafeMethods;
+            }
+            return super.getStringProp(propertyName);
+        }
+    }
 	private static final String PREFERRED_ENCODING = "UTF-8";
 	
     /**
@@ -464,6 +507,107 @@ public class EncoderTest extends TestCase {
         Codec c = new MySQLCodec(MySQLCodec.Mode.ANSI);
         //No special handling is required for double quotes in ANSI_Quotes mode
         assertEquals("MySQL Ansi Quote Injection Bug", "\" or 1=1 -- -", instance.encodeForSQL(c, "\" or 1=1 -- -"));
+    }
+
+    /**
+     * CVE-2025-5878 / ESAPI Security Bulletin #13: {@code encodeForSQL} must refuse to
+     * "escape" SQL unless it has been explicitly enabled via the ESAPI property
+     * <b>ESAPI.dangerouslyAllowUnsafeMethods.methodNames</b>. Otherwise input such as
+     * {@code \' or 1=1 --} is returned "escaped" by {@code OracleCodec} while the backslash
+     * (Oracle's default escape character) is left untouched, allowing SQL injection.
+     */
+    public void testEncodeForSQLDisabledUnlessExplicitlyEnabled() {
+        System.out.println("encodeForSQLDisabledUnlessExplicitlyEnabled");
+        ESAPI.override(null);
+        SecurityConfiguration orig = ESAPI.securityConfiguration();
+        Encoder instance = ESAPI.encoder();
+
+        String sqli = "Jeff\\' or '1'='1' --";
+        Codec[] codecs = { new OracleCodec(),
+                           new MySQLCodec(MySQLCodec.Mode.ANSI),
+                           new MySQLCodec(MySQLCodec.Mode.STANDARD),
+                           new DB2Codec() };
+        String[] notEnabled = { null,   // Property absent (e.g., an ESAPI.properties predating this fix)
+                                "",     // Shipped default
+                                "   ",
+                                "org.owasp.esapi.Encoder.encodeForSQL",
+                                "org.owasp.esapi.reference.DefaultEncoder",
+                                "org.owasp.esapi.reference.DefaultEncoder.encodeForSQ",
+                                "org.owasp.esapi.reference.DefaultEncoder.encodeForSQLX",
+                                "org.owasp.esapi.reference.DefaultEncoder.*",
+                                "org.owasp.esapi.reference.DefaultEncoder.encodeForOS" };
+        try {
+            for ( String allowed : notEnabled ) {
+                ESAPI.override( new UnsafeMethodsConf(orig, allowed) );
+                for ( Codec codec : codecs ) {
+                    try {
+                        String encoded = instance.encodeForSQL(codec, sqli);
+                        fail("encodeForSQL should not be enabled for methodNames='" + allowed + "' but returned: " + encoded);
+                    } catch (NotConfiguredByDefaultException expected) {
+                        assertTrue( expected.getMessage().contains(DefaultSecurityConfiguration.ACCEPTED_UNSAFE_METHOD_NAMES) );
+                    }
+                    try {
+                        instance.encodeForSQL(codec, null);
+                        fail("encodeForSQL should not be enabled for methodNames='" + allowed + "' even for null input");
+                    } catch (NotConfiguredByDefaultException expected) {
+                        // Expected
+                    }
+                }
+            }
+        } finally {
+            ESAPI.override(null);
+        }
+    }
+
+    /**
+     * CVE-2025-5878: {@code encodeForSQL} still works once it has been explicitly enabled.
+     */
+    public void testEncodeForSQLWhenExplicitlyEnabled() {
+        System.out.println("encodeForSQLWhenExplicitlyEnabled");
+        ESAPI.override(null);
+        SecurityConfiguration orig = ESAPI.securityConfiguration();
+        Encoder instance = ESAPI.encoder();
+
+        String[] enabled = { "org.owasp.esapi.reference.DefaultEncoder.encodeForSQL",
+                             " org.owasp.esapi.reference.DefaultEncoder.encodeForOS , org.owasp.esapi.reference.DefaultEncoder.encodeForSQL " };
+        try {
+            for ( String allowed : enabled ) {
+                ESAPI.override( new UnsafeMethodsConf(orig, allowed) );
+                assertEquals("Oracle", "Jeff'' or ''1''=''1", instance.encodeForSQL(new OracleCodec(), "Jeff' or '1'='1"));
+                assertEquals("Oracle", null, instance.encodeForSQL(new OracleCodec(), null));
+            }
+        } finally {
+            ESAPI.override(null);
+        }
+    }
+
+    /**
+     * CVE-2025-5878: the ESAPI.properties shipped in the configuration jar must leave
+     * {@code encodeForSQL} disabled.
+     */
+    public void testEncodeForSQLDisabledByShippedConfiguration() throws IOException {
+        System.out.println("encodeForSQLDisabledByShippedConfiguration");
+        File shipped = new File(System.getProperty("basedir", "."), "configuration/esapi/ESAPI.properties");
+        assertTrue("Missing " + shipped.getPath(), shipped.isFile());
+        Properties props = new Properties();
+        try (InputStream in = new FileInputStream(shipped)) {
+            props.load(in);
+        }
+        String shippedValue = props.getProperty(DefaultSecurityConfiguration.ACCEPTED_UNSAFE_METHOD_NAMES);
+        assertEquals("", shippedValue);
+
+        ESAPI.override(null);
+        SecurityConfiguration orig = ESAPI.securityConfiguration();
+        Encoder instance = ESAPI.encoder();
+        try {
+            ESAPI.override( new UnsafeMethodsConf(orig, shippedValue) );
+            instance.encodeForSQL(new OracleCodec(), "Jeff\\' or '1'='1' --");
+            fail("encodeForSQL must be disabled by the shipped ESAPI.properties");
+        } catch (NotConfiguredByDefaultException expected) {
+            // Expected
+        } finally {
+            ESAPI.override(null);
+        }
     }
 
     
