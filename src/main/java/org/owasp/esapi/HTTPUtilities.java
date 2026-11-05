@@ -301,16 +301,87 @@ public interface HTTPUtilities
 
 
     /**
-     * Extract uploaded files from a multipart HTTP requests. Implementations must check the content to ensure that it
+     * Extract uploaded files from a multipart/form-data HTTP request. Implementations must check the content to ensure that it
      * is safe before making a permanent copy on the local filesystem. Checks should include length and content checks,
      * possibly virus checking, and path and name checks. Refer to the file checking methods in Validator for more
-     * information.
-     * <p/>
-	 * This method uses {@link HTTPUtilities#getCurrentRequest()} to obtain the {@link HttpServletRequest} object
+     * information. <b>Important Note:</b> The ESAPI reference implementation (i.e.,
+     * {@code org.owasp.esapi.reference.DefaultHTTPUtilities}) only does some of these things listed above and some of those
+     * are limited to which {@code getFileUploads} method is called and how you've set your relevant ESAPI properties
+     * in your <b>ESAPI.properties</b> file.
+     * <p/><p>
+	 * This method uses {@link HTTPUtilities#getCurrentRequest()} to obtain the {@link HttpServletRequest} object.
+     * If the ESAPI property <b>HttpUtilities.FileUploadAllowAnonymousUser</b> is set to {@code false} (the
+     * default is {@code true}), then {@code getFileUploads} will call {@code ESAPI.authenticator().getCurrentUser()}
+     * to check if the user is authenticated. If that property is set to {@code false} and a call to that function returns
+     * an anonymous (i.e., unauthenticated) user, then the file upload is blocked.
+     * <p/><p>
+     * ESAPI properties relevant to this and the other {@code getFileUploads} methods referenced in this table. The
+     * last 2 properties were added to address the file upload DoS issues related to CVE-2023-24998:
+     * <table border="1">
+     *   <tr>
+     *     <th>ESAPI Property Name</th>
+     *     <th>ESAPI.properties Default</th>
+     *     <th>Builtin Default</th>
+     *     <th>Meaning</th>
+     *   </tr>
+     *   <tr>
+     *     <td>HttpUtilities.UploadDir</td>
+     *     <td>C:\ESAPI\testUpload</td>
+     *     <td>UploadDir</td>
+     *     <td>Final destination directory for uploaded files.</td>
+     *   </tr>
+     *   <tr>
+     *     <td>HttpUtilities.UploadTempDir</td>
+     *     <td>C:\temp</td>
+     *     <td>Value of system property java.io.tmpdir</td>
+     *     <td>Temporary staging directory for uploaded files.</td>
+     *   </tr>
+     *   <tr>
+     *     <td>HttpUtilities.ApprovedUploadExtensions</td>
+     *     <td>.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.rtf,.txt,.jpg,.png</td>
+     *     <td>.pdf,.txt,.jpg,.png</td>
+     *     <td>Comma separated allowed list of file suffixes that may be uploaded.</td>
+     *   </tr>
+     *   <tr>
+     *     <td>HttpUtilities.MaxUploadFileBytes</td>
+     *     <td>500000000</td>
+     *     <td>5000000</td>
+     *     <td>Total maximum upload file size for uploaded files per HTTP request.</td>
+     *   </tr>
+     *   <tr>
+     *     <td>HttpUtilities.MaxUploadFileCount</td>
+     *     <td>20</td>
+     *     <td>20</td>
+     *     <td>Maximum total number of uploaded files (i.e., multipart/form-data parts) per HTTP request.
+     *         Set to -1 for no maximum.</td>
+     *   </tr>
+     *   <tr>
+     *     <td>HttpUtilities.FileUploadAllowAnonymousUser</td>
+     *     <td>true</td>
+     *     <td>true</td>
+     *     <td>Controls whether anonymous (i.e., unauthenticated) users may upload files.</td>
+     *   </tr>
+     * </table>
+     * <p/><p>
+     * As alluded to above, it is important to note that these {@code getFileUploads} methods do not do
+     * everything to keep your application and environment secure. Some of the more obvious omissions are the
+     * absence of examining the actual file content to determine the actual file type or running some AV scan
+     * on the uploaded files. You have to add that functionality to you if you want or need that. Some
+     * resources that you may find useful are:
+     * <ul>
+     *   <li><a href="https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html">OWASP File Upload Cheat Sheet</a></li>
+     *   <li><a href="https://cheatsheetseries.owasp.org/cheatsheets/Denial_of_Service_Cheat_Sheet.html">OWASP Denial of Service Cheat Sheet</a></li>
+     *   <li><a href="https://tika.apache.org/">Apache Tika - a content analysis toolkit</a></li>
+     * </ul>
      *
-     * @param request
-     * @return List of new File objects from upload
+     * @param request The applicable HTTP request
+     * @param destinationDir The destination directory to leave the uploaded file in.
+     * @param allowedExtensions Permitted file suffixes. (Yes, this is a weak check. Use Apache Tika if you
+     *                          want something more.)
+     * @return List of new {@code File} objects from upload
      * @throws ValidationException if the file fails validation
+     * @throws java.security.AccessControlException If anonymous users are not allowed and the user is
+     *                                      not authenticated as per the ESAPI {@code Authenticator}.
      */
     List getFileUploads(HttpServletRequest request, File destinationDir, List allowedExtensions) throws ValidationException;
 

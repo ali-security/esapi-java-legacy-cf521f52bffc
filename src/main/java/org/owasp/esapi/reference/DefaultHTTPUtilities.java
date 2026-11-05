@@ -139,6 +139,11 @@ public class DefaultHTTPUtilities implements org.owasp.esapi.HTTPUtilities {
     /** The max bytes. */
 	static final int maxBytes = ESAPI.securityConfiguration().getAllowedFileUploadSize();
 
+    /** The default max # of files per request, used if 'HttpUtilities.MaxUploadFileCount' is not set. */
+    static final int DEFAULT_MAX_UPLOAD_FILE_COUNT = 20;   // Same as default in configuration/esapi/ESAPI.properties
+
+    /** The default for 'HttpUtilities.FileUploadAllowAnonymousUser', used if that property is not set. */
+    static final boolean DEFAULT_FILEUPLOAD_ALLOW_ANONYMOUS_USERS = true;   // Same as default in configuration/esapi/ESAPI.properties
 
     /*
      * The currentRequest ThreadLocal variable is used to make the currentRequest available to any call in any part of an
@@ -542,6 +547,15 @@ public class DefaultHTTPUtilities implements org.owasp.esapi.HTTPUtilities {
 			finalDir = ESAPI.securityConfiguration().getUploadDirectory();
 		}
 
+		// Check if this user should be blocked from file upload access. See allowUserFileUploadAccess() and comments
+		// around 'HttpUtilities.FileUploadAllowAnonymousUser' in ESAPI.properties file for details.
+		if ( ! allowUserFileUploadAccess() ) {
+			final String authZErrorMsg = "Upload failed. Anonymous user disallowed by ESAPI property " +
+			                             "'HttpUtilities.FileUploadAllowAnonymousUser'; attempted file upload blocked.";
+			logger.warning(Logger.SECURITY_FAILURE, authZErrorMsg);
+			throw new java.security.AccessControlException( authZErrorMsg );
+		}
+
 		List<File> newFiles = new ArrayList<File>();
 		String dfiPrevValue = "false";   // Fail safely in case of Java Security Manager & weird security policy
 		try {
@@ -553,8 +567,9 @@ public class DefaultHTTPUtilities implements org.owasp.esapi.HTTPUtilities {
 			}
 
 			// this factory will store ALL files in the temp directory,
-			// regardless of size
-			DiskFileItemFactory factory = new DiskFileItemFactory(0, tempDir);
+			// regardless of size. It also limits the # of files per request,
+			// which is required to address CVE-2023-24998.
+			DiskFileItemFactory factory = new FileCountLimitingDiskFileItemFactory(0, tempDir, getMaxUploadFileCount());
 			ServletFileUpload upload = new ServletFileUpload(factory);
 			upload.setSizeMax(maxBytes);
 
@@ -1091,6 +1106,109 @@ public class DefaultHTTPUtilities implements org.owasp.esapi.HTTPUtilities {
             CipherText.fromPortableSerializedBytes(serializedCiphertext);
         PlainText plaintext = ESAPI.encryptor().decrypt(restoredCipherText);
         return plaintext.toString();
+    }
+
+    /* Helper method to get the maximum # of files (i.e., multipart/form-data
+     * parts, including regular form fields) allowed per HTTP request, as
+     * specified by the ESAPI property "HttpUtilities.MaxUploadFileCount".
+     * A negative value (e.g., -1) means no maximum. Related to CVE-2023-24998.
+     *
+     * The property is looked up each time it is needed rather than once in a
+     * static initializer so that it always reflects the SecurityConfiguration
+     * that is currently in use. If the property is not set (which is likely,
+     * because ESAPI clients seldom update their ESAPI.properties file from
+     * release to release) or cannot be read, the hard-coded default is used.
+     */
+    private int getMaxUploadFileCount() {
+        try {
+            return ESAPI.securityConfiguration().getIntProp( DefaultSecurityConfiguration.MAX_UPLOAD_FILE_COUNT );
+        } catch ( RuntimeException ex ) {   // Usually a ConfigurationException because the property is not set.
+            logger.warning(Logger.EVENT_FAILURE, "Caught exception looking for property " +
+                    DefaultSecurityConfiguration.MAX_UPLOAD_FILE_COUNT + " in ESAPI.properties. Using hard-coded default of " +
+                    DEFAULT_MAX_UPLOAD_FILE_COUNT + "; exception was: " + ex);
+            return DEFAULT_MAX_UPLOAD_FILE_COUNT;
+        }
+    }
+
+    /* Helper method, currently used only to check if we allow anonymous
+     * (i.e., unauthenticated) users to perform file uploads.
+     * The default is do allow anonymous users. We start to see if the property
+     * specified by "HttpUtilities.FileUploadAllowAnonymousUser" is set to
+     * {@code true} (which is the default). If that is true, we immediately
+     * return true as no further authentication check is required. However, if
+     * that property is false, then we check if the user is authenticated (i.e.,
+     * the returned {@code User} object is not the anonymous user).
+     */
+    private boolean allowUserFileUploadAccess() {
+        boolean fileUploadAllowAnonymousUsers = DEFAULT_FILEUPLOAD_ALLOW_ANONYMOUS_USERS;
+        try {
+            fileUploadAllowAnonymousUsers = ESAPI.securityConfiguration().getBooleanProp( DefaultSecurityConfiguration.FILEUPLOAD_ALLOW_ANONYMOUS_USERS );
+        } catch ( RuntimeException ex ) {
+            // This likely will be the normal case (because ESAPI clients seldom update
+            // their ESAPI.properties file from release to release. Therefore, I am
+            // going to ignore it, and we silently go with the default of 'true'.
+            ;      // Intentionally ignore!
+        }
+
+        if ( fileUploadAllowAnonymousUsers ) {
+            return true;    // Okay to allow anonymous users
+        }
+
+        // Check if the current user is authenticated as per ESAPI Authenticator.
+        User currentUser = ESAPI.authenticator().getCurrentUser();
+
+        if ( ! currentUser.isAnonymous() ) {
+                //
+                // The logging here is set to 'debug' rather than 'info'
+                // because I figured that the web / app server access logs
+                // should pick up the the authenticated user and log it
+                // along with whatever the HTTP request is, presumably including
+                // the authenticated user account name.
+                //
+                // If you are using JUL for logging and want to see this debug
+                // output, you need to change both instances of 'INFO' in your
+                // 'esapi-java-logging.properties' from 'INFO' to 'FINE' (not
+                // 'DEBUG', which isn't a thing in JUL).
+                //
+            logger.debug(Logger.SECURITY_SUCCESS, "Allowing authenticated user '" + currentUser.getAccountName() +
+                                                  " to upload file(s) via getFileUploads method.");
+            return true;       // User is authenticated, so allow access.
+        }
+        return false;   // User not authenticated; deny access.
+    }
+
+    /* A DiskFileItemFactory that limits the total # of items (i.e., the parts of a
+     * multipart/form-data request, including regular form fields) that it creates.
+     * This is required to address CVE-2023-24998, because the version of Apache
+     * Commons FileUpload used by ESAPI does not have FileUploadBase.setFileCountMax().
+     *
+     * ServletFileUpload.parseRequest() calls createItem() for each part before any
+     * of that part's content is written to the temp directory, so the upload is
+     * aborted as soon as the limit is exceeded. Since FileItemFactory.createItem()
+     * may not throw a checked exception, an unchecked exception is thrown; it
+     * propagates out of parseRequest() (which deletes all the items it had already
+     * created) and getFileUploads() converts it to a ValidationUploadException.
+     *
+     * A new instance must be used for each request. A negative maxFileCount means
+     * no maximum.
+     */
+    private static class FileCountLimitingDiskFileItemFactory extends DiskFileItemFactory {
+        private final int maxFileCount;
+        private int fileCount = 0;
+
+        FileCountLimitingDiskFileItemFactory(int sizeThreshold, File repository, int maxFileCount) {
+            super(sizeThreshold, repository);
+            this.maxFileCount = maxFileCount;
+        }
+
+        @Override
+        public FileItem createItem(String fieldName, String contentType, boolean isFormField, String fileName) {
+            if ( maxFileCount >= 0 && ++fileCount > maxFileCount ) {
+                throw new IllegalStateException("Request exceeds the maximum number of files (" + maxFileCount +
+                        ") allowed per request by ESAPI property '" + DefaultSecurityConfiguration.MAX_UPLOAD_FILE_COUNT + "'");
+            }
+            return super.createItem(fieldName, contentType, isFormField, fileName);
+        }
     }
 }
 
