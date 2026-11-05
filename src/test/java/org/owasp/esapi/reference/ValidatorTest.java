@@ -998,6 +998,65 @@ public class ValidatorTest extends TestCase {
         }
     }
 
+    // Test to confirm that CVE-2022-24891 is fixed. The cause of this was
+    // from a subtle botched regex for 'onsiteURL' in all the versions of
+    // antsamy-esapi.xml that had been there as far back as ESAPI 1.4!
+    //
+    // This CVE should arguably get the same CVSSv3 store as the AntiSamy
+    // CVE-2021-35043 as the are very similar.
+    public void testJavaScriptURL() throws Exception {
+        System.out.println("testJavaScriptURL");
+
+        String expectedSafeText = "This is safe from XSS. Trust us!";
+        String badVoodoo = "<a href=\"javascript:alert(1)\">" + expectedSafeText + "</a>";
+        Validator instance = ESAPI.validator();
+        ValidationErrorList errorList = new ValidationErrorList();
+        String result = instance.getValidSafeHTML("test", badVoodoo, 100, false, errorList);
+        assertEquals( expectedSafeText, result );
+    }
+
+    // CVE-2022-24891: encoded and otherwise disguised javascript: (and other
+    // script-capable) URLs are removed too, while ordinary links survive.
+    public void testJavaScriptURLVariants() throws Exception {
+        System.out.println("testJavaScriptURLVariants");
+
+        String expectedSafeText = "This is safe from XSS. Trust us!";
+        Validator instance = ESAPI.validator();
+
+        String[] badHrefs = {
+            "JavaScript:alert(1)",
+            "javascript&colon;alert&lpar;1&rpar;",
+            "javascript&#58;alert(1)",
+            "javascript&#x3a;alert(1)",
+            "javascript&#00058alert(1)",
+            "vbscript:msgbox(1)",
+            "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==",
+            "//evil.example.com/xss.html"
+        };
+        for (String href : badHrefs) {
+            String badVoodoo = "<a href=\"" + href + "\">" + expectedSafeText + "</a>";
+            ValidationErrorList errorList = new ValidationErrorList();
+            assertEquals(href, expectedSafeText, instance.getValidSafeHTML("test", badVoodoo, 200, false, errorList));
+            assertTrue(href, errorList.isEmpty());
+            assertFalse(href, instance.isValidSafeHTML("test", badVoodoo, 200, false));
+        }
+
+        String[] goodHrefs = {
+            "/esapi/docs/index.html",
+            "index.html?page=2#top",
+            "#top",
+            "https://www.owasp.org/index.php/ESAPI",
+            "mailto:esapi@owasp.org"
+        };
+        for (String href : goodHrefs) {
+            String link = "<a href=\"" + href + "\">" + expectedSafeText + "</a>";
+            ValidationErrorList errorList = new ValidationErrorList();
+            assertEquals(href, link, instance.getValidSafeHTML("test", link, 200, false, errorList));
+            assertTrue(href, errorList.isEmpty());
+            assertTrue(href, instance.isValidSafeHTML("test", link, 200, false));
+        }
+    }
+
     public void testSafeReadLine() {
         System.out.println("safeReadLine");
 

@@ -15,8 +15,11 @@
  */
 package org.owasp.esapi.reference.validation;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import org.owasp.esapi.errors.ConfigurationException;
@@ -47,6 +50,30 @@ public class HTMLValidationRule extends StringValidationRule {
 	private static Policy antiSamyPolicy = null;
 	private static final Logger LOGGER = ESAPI.getLogger( "HTMLValidationRule" ); 
 	
+	/**
+	 * The vulnerable {@code htmlTitle}, {@code onsiteURL} and {@code offsiteURL}
+	 * regular expressions, exactly as they appear in the stock
+	 * {@code antisamy-esapi.xml} policy file shipped with every ESAPI 2.x release
+	 * before 2.3.0.0, each paired with the corrected value from ESAPI 2.3.0.0
+	 * (CVE-2022-24891). Among other flaws, the stock {@code onsiteURL} contains the
+	 * character range {@code \#-~}, which includes {@code :}, so {@code javascript:}
+	 * URLs were accepted as "onsite" links.
+	 */
+	private static final String[][] VULNERABLE_STOCK_REGEXPS = {
+		{
+			"name=\"htmlTitle\" value=\"[a-zA-Z0-9\\s-_',:\\[\\]!\\./\\\\\\(\\)]*\"",
+			"name=\"htmlTitle\" value=\"[\\p{L}\\p{N}\\s\\-_',:\\[\\]!\\./\\\\\\(\\)&amp;]*\""
+		},
+		{
+			"name=\"onsiteURL\" value=\"([\\w\\\\/\\.\\?=&amp;;\\#-~]+|\\#(\\w)+)\"",
+			"name=\"onsiteURL\" value=\"^(?!//)(?![\\p{L}\\p{N}\\\\\\.\\#@\\$%\\+&amp;;\\-_~,\\?=/!]*(&amp;colon))[\\p{L}\\p{N}\\\\\\.\\#@\\$%\\+&amp;;\\-_~,\\?=/!]*\""
+		},
+		{
+			"name=\"offsiteURL\" value=\"(\\s)*((ht|f)tp(s?)://|mailto:)[A-Za-z0-9]+[~a-zA-Z0-9-_\\.@#$%&amp;;:,\\?=/\\+!]*(\\s)*\"",
+			"name=\"offsiteURL\" value=\"(\\s)*((ht|f)tp(s?)://|mailto:)[\\p{L}\\p{N}]+[\\p{L}\\p{N}\\p{Zs}\\.\\#@\\$%\\+&amp;;:\\-_~,\\?=/!\\(\\)]*(\\s)*\""
+		}
+	};
+
 	static {
         InputStream resourceStream = null;
 		try {
@@ -56,12 +83,63 @@ public class HTMLValidationRule extends StringValidationRule {
 	            }
         if (resourceStream != null) {
         	try {
-				antiSamyPolicy = Policy.getInstance(resourceStream);
+				antiSamyPolicy = loadAntiSamyPolicy(resourceStream);
+			} catch (IOException e) {
+				throw new ConfigurationException("Couldn't read antisamy-esapi.xml", e);
 			} catch (PolicyException e) {
 				throw new ConfigurationException("Couldn't parse antisamy policy", e);
 		        }
 			}
 		}
+
+	/**
+	 * Reads an AntiSamy policy fully from the given stream, which is then closed,
+	 * corrects any vulnerable stock regular expressions in it (see
+	 * {@link #fixVulnerableStockRegexps(String)}) and parses the result.
+	 *
+	 * @param policyStream the AntiSamy policy file contents.
+	 * @return the parsed AntiSamy policy.
+	 * @throws IOException if the policy cannot be read.
+	 * @throws PolicyException if the policy cannot be parsed.
+	 */
+	static Policy loadAntiSamyPolicy(InputStream policyStream) throws IOException, PolicyException {
+		String policy;
+		try {
+			ByteArrayOutputStream contents = new ByteArrayOutputStream();
+			byte[] buffer = new byte[4096];
+			int count;
+			while ((count = policyStream.read(buffer)) != -1) {
+				contents.write(buffer, 0, count);
+			}
+			// ISO-8859-1 maps every byte to exactly one char and back again, so the
+			// policy file passes through unchanged whatever its own encoding is.
+			policy = new String(contents.toByteArray(), StandardCharsets.ISO_8859_1);
+		} finally {
+			policyStream.close();
+		}
+		policy = fixVulnerableStockRegexps(policy);
+		return Policy.getInstance(new ByteArrayInputStream(policy.getBytes(StandardCharsets.ISO_8859_1)));
+	}
+
+	/**
+	 * Replaces the vulnerable {@code htmlTitle}, {@code onsiteURL} and
+	 * {@code offsiteURL} regular expressions of the stock {@code antisamy-esapi.xml}
+	 * policy file shipped with ESAPI releases before 2.3.0.0 with their corrected
+	 * values (CVE-2022-24891), so that applications still using a copy of that
+	 * stock policy file are protected. Only the exact stock values are replaced;
+	 * customized regular expressions are left unchanged.
+	 *
+	 * @param policy the AntiSamy policy file contents.
+	 * @return the policy file contents with any vulnerable stock regular
+	 *         expressions corrected.
+	 */
+	static String fixVulnerableStockRegexps(String policy) {
+		String fixed = policy;
+		for (String[] regexp : VULNERABLE_STOCK_REGEXPS) {
+			fixed = fixed.replace(regexp[0], regexp[1]);
+		}
+		return fixed;
+	}
 
 	public HTMLValidationRule( String typeName ) {
 		super( typeName );
